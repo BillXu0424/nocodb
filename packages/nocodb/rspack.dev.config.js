@@ -83,6 +83,11 @@ const baseDevConfig = {
       name: 'main.js',
       // Set autorestart false when enabling HMR
       autoRestart: true,
+      // Pass debug port to child process only (not to rspack main process)
+      // nodeArgs will be used as execArgv for the spawned node process
+      nodeArgs: process.env.DEBUG_PORT 
+        ? [`--inspect=0.0.0.0:${process.env.DEBUG_PORT}`]
+        : process.execArgv.filter(arg => !arg.includes('--inspect')),
     }),
     // Uncomment the below line when enabling HMR
     // new rspack.HotModuleReplacementPlugin(),

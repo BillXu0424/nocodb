@@ -27,6 +27,8 @@
     "registerIntegrations": "node build-utils/registerIntegrations.js",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "pnpm run watch:run",
+    "start:local": "cross-env NODE_ENV=development NC_DISABLE_TELE=true ENTRYPOINT=src/run/local rspack --config rspack.dev.config.js",
+    "start:local:debug": "cross-env NODE_ENV=development NC_DISABLE_TELE=true DEBUG_PORT=9229 ENTRYPOINT=src/run/local rspack --config rspack.dev.config.js",
     "start:prod": "node docker/main",
     "lint": "eslint \"src/**/*.ts\" --fix",
     "test": "jest --runInBand --forceExit --passWithNoTests",
