@@ -329,9 +329,20 @@ export class BasesService {
           );
 
           source.fk_integration_id = integration.id;
-          source.config = {
-            client: baseBody.config?.client,
-          };
+          // For NC_MINIMAL_DBS, preserve the full config including connection.connection.filename
+          // For other cases, only keep the client
+          if (
+            process.env.NC_MINIMAL_DBS === 'true' &&
+            source.is_local &&
+            source.config?.connection?.connection?.filename
+          ) {
+            // Keep the full config for minimal DBs
+            // Don't reset it
+          } else {
+            source.config = {
+              client: baseBody.config?.client,
+            };
+          }
         }
       }
       baseBody.is_meta = false;

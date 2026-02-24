@@ -332,7 +332,33 @@ export default class Source implements SourceType {
   }
 
   public async getConnectionConfig(): Promise<any> {
-    if (this.is_meta || this.is_local) {
+    // If NC_MINIMAL_DBS is enabled and source is local, use source's own config
+    // instead of meta database config
+    if (
+      this.is_local &&
+      process.env.NC_MINIMAL_DBS === 'true' &&
+      !this.is_meta
+    ) {
+      const config = this.getConfig();
+
+      // Ensure config exists and has the expected structure
+      if (!config) {
+        // Fallback to meta config if source config is missing
+        const metaConfig = await NcConnectionMgrv2.getDataConfig();
+        const fallbackConfig = { ...metaConfig };
+        if (fallbackConfig.client === 'sqlite3') {
+          fallbackConfig.connection = metaConfig;
+        }
+        return fallbackConfig;
+      }
+
+      // Return config as-is to preserve nested structure for migration
+      // The nested connection.connection.filename structure is expected by KnexMigratorv2
+      // NcConnectionMgrv2.get() will normalize it when creating the Knex connection
+      return config;
+    }
+
+    if (this.is_meta || (this.is_local && process.env.NC_MINIMAL_DBS !== 'true')) {
       const metaConfig = await NcConnectionMgrv2.getDataConfig();
       const config = { ...metaConfig };
       if (config.client === 'sqlite3') {

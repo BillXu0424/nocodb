@@ -61,22 +61,51 @@ export default class NcConnectionMgrv2 {
   }
 
   public static async get(source: Source): Promise<XKnex> {
-    if (source.isMeta()) return Noco.ncMeta.knex;
+    // For NC_MINIMAL_DBS, is_local sources should use their own config, not meta DB
+    // Only return meta DB if it's actually a meta source (is_meta=true) or
+    // if it's local but NC_MINIMAL_DBS is not enabled
+    if (
+      source.isMeta(true) ||
+      (source.isMeta() &&
+        process.env.NC_MINIMAL_DBS !== 'true')
+    ) {
+      return Noco.ncMeta.knex;
+    }
 
     if (this.connectionRefs?.[source.base_id]?.[source.id]) {
-      return this.connectionRefs?.[source.base_id]?.[source.id];
+      return this.connectionRefs[source.base_id][source.id];
     }
     this.connectionRefs[source.base_id] =
       this.connectionRefs?.[source.base_id] || {};
 
     const connectionConfig = await source.getConnectionConfig();
 
+    // Normalize SQLite connection config structure for Knex
+    // Handle nested connection.connection.filename from bases.service.ts
+    let normalizedConnection = connectionConfig.connection;
+    if (connectionConfig.client === 'sqlite3' && normalizedConnection) {
+      // Extract filename from nested structure if needed
+      // For NC_MINIMAL_DBS, config has structure: connection.connection.filename
+      const filename =
+        normalizedConnection.filename ||
+        normalizedConnection.connection?.filename;
+      if (filename) {
+        normalizedConnection = {
+          filename,
+        };
+      } else if (normalizedConnection.connection) {
+        // If we have nested connection but no filename, try to use the nested connection directly
+        // This handles the case where the structure is connection.connection.filename
+        normalizedConnection = normalizedConnection.connection;
+      }
+    }
+
     this.connectionRefs[source.base_id][source.id] = XKnex({
       ...defaultConnectionOptions,
       ...connectionConfig,
       connection: {
         ...defaultConnectionConfig,
-        ...connectionConfig.connection,
+        ...normalizedConnection,
         typeCast(field, next) {
           const res = next();
 
