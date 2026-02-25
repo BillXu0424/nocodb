@@ -115,6 +115,7 @@ import { McpController } from '~/mcp/mcp.controller';
 import { InternalController } from '~/controllers/internal.controller';
 import { ViewRowColorV3Service } from '~/services/v3/view-row-color-v3.service';
 import { DependencyService } from '~/services/dependency.service';
+import { DatusAgentService } from '~/services/datus-agent.service';
 
 /* Datas */
 import { BulkDataAliasController } from '~/controllers/bulk-data-alias.controller';
@@ -330,6 +331,7 @@ export const nocoModuleMetadata = {
     ViewRowColorV3Service,
     ViewsV3Service,
     DependencyService,
+    DatusAgentService,
 
     /* Datas */
     DataTableService,

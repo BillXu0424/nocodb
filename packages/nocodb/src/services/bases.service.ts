@@ -33,6 +33,7 @@ import { MetaTable, RootScopes } from '~/utils/globals';
 import { TablesService } from '~/services/tables.service';
 import { stringifyMetaProp } from '~/utils/modelUtils';
 import NocoSocket from '~/socket/NocoSocket';
+import { DatusAgentService } from '~/services/datus-agent.service';
 
 const nanoid = customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz_', 4);
 
@@ -44,6 +45,7 @@ export class BasesService {
     protected readonly appHooksService: AppHooksService,
     protected metaService: MetaService,
     protected tablesService: TablesService,
+    protected readonly datusAgentService?: DatusAgentService,
   ) {}
 
   async baseList(
@@ -405,7 +407,49 @@ export class BasesService {
       context,
     });
 
+    // 为 base 的 default 数据源（第一个非 meta source，通常是 SQLite）创建 datus-agent namespace
+    if (this.datusAgentService) {
+      try {
+        await this.createDatusNamespaceForDefaultSource(base, ncMeta);
+      } catch (error) {
+        // 记录错误但不影响 base 创建流程
+        this.logger.warn(
+          `Failed to create datus-agent namespace for default source of base ${base.id}: ${error.message}`,
+        );
+      }
+    }
+
     return base;
+  }
+
+  /**
+   * 为 base 的 default 数据源创建 datus-agent namespace
+   */
+  private async createDatusNamespaceForDefaultSource(
+    base: Base,
+    ncMeta = Noco.ncMeta,
+  ) {
+    if (!this.datusAgentService) {
+      return;
+    }
+
+    const sources = await base.getSources(undefined, ncMeta);
+
+    // 找到第一个非 meta 的 source（default 数据源）
+    // 对于 NC_MINIMAL_DBS，通常是 SQLite
+    const defaultSource = sources.find((s) => !s.is_meta);
+
+    if (!defaultSource) {
+      this.logger.debug(
+        `Base ${base.id} has no non-meta source, skipping namespace creation`,
+      );
+      return;
+    }
+
+    await this.datusAgentService.createNamespaceForSource(
+      defaultSource,
+      base,
+    );
   }
 
   async createDefaultBase(

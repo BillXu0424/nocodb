@@ -15,10 +15,17 @@ import { Base, Integration, Source } from '~/models';
 import { NcError } from '~/helpers/catchError';
 import Noco from '~/Noco';
 import NocoSocket from '~/socket/NocoSocket';
+import { DatusAgentService } from '~/services/datus-agent.service';
+import { Logger } from '@nestjs/common';
 
 @Injectable()
 export class SourcesService {
-  constructor(protected readonly appHooksService: AppHooksService) {}
+  protected readonly logger = new Logger(SourcesService.name);
+
+  constructor(
+    protected readonly appHooksService: AppHooksService,
+    protected readonly datusAgentService?: DatusAgentService,
+  ) {}
 
   async baseGetWithConfig(context: NcContext, param: { sourceId: any }) {
     const source = await Source.get(context, param.sourceId);
@@ -105,6 +112,23 @@ export class SourcesService {
         source.fk_integration_id,
       );
       await source.delete(context, ncMeta);
+
+      // 删除 datus-agent 中的 namespace（仅对非 meta 的外部数据库 source）
+      if (this.datusAgentService && !source.is_meta) {
+        try {
+          const namespaceName = `nocodb_${source.base_id}_${source.id}`;
+          await this.datusAgentService.deleteNamespace(namespaceName);
+          this.logger.log(
+            `Successfully deleted datus-agent namespace '${namespaceName}' for source ${source.id}`,
+          );
+        } catch (error) {
+          // 记录错误但不影响 source 删除流程
+          this.logger.warn(
+            `Failed to delete datus-agent namespace for source ${source.id}: ${error.message}`,
+          );
+        }
+      }
+
       this.appHooksService.emit(AppEvents.SOURCE_DELETE, {
         source: {
           ...source,
@@ -252,6 +276,19 @@ export class SourcesService {
         context,
       });
 
+      // 为新创建的数据源在 datus-agent 中创建 namespace（仅对非 meta 的外部数据库）
+      // 必须在清空 config 之前调用，因为 createNamespaceForSource 需要访问 source.getConfig()
+      if (this.datusAgentService && !source.is_meta) {
+        try {
+          await this.createDatusNamespace(source, base);
+        } catch (error) {
+          // 记录错误但不影响 source 创建流程
+          this.logger.warn(
+            `Failed to create datus-agent namespace for source ${source.id}: ${error.message}`,
+          );
+        }
+      }
+
       source.config = undefined;
       source.integration_config = undefined;
 
@@ -278,5 +315,16 @@ export class SourcesService {
     }
 
     return { source, error };
+  }
+
+  /**
+   * 在 datus-agent 中创建 namespace
+   */
+  private async createDatusNamespace(source: Source, base: Base) {
+    if (!this.datusAgentService) {
+      return;
+    }
+
+    await this.datusAgentService.createNamespaceForSource(source, base);
   }
 }
