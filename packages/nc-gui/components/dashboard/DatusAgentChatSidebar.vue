@@ -5,11 +5,34 @@ import utc from 'dayjs/plugin/utc.js'
 
 dayjs.extend(utc)
 
+interface ReasoningItem {
+  type: string
+  message: string
+  name?: string
+  input?: Record<string, unknown> | string
+  output?: Record<string, unknown> | string
+}
+
+interface ProgressStep {
+  id: string
+  type: 'thinking' | 'tool'
+  message: string
+  status: 'pending' | 'active' | 'completed' | 'failed'
+  /** 工具名，tool 类型时有值 */
+  toolName?: string
+  /** 工具输入参数，tool 类型时有值 */
+  toolInput?: Record<string, unknown> | string
+  /** 工具输出，tool 类型且有结果时有值 */
+  toolOutput?: Record<string, unknown> | string
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
   timestamp: number
+  progress?: ProgressStep[]
+  reasoning?: ReasoningItem[]
 }
 
 interface SuggestedPrompt {
@@ -46,6 +69,85 @@ const isStreaming = ref(false)
 
 // 会话 ID
 const sessionId = ref<string>('')
+
+// 折叠展开状态：哪些消息的推理面板已展开
+const expandedReasoningIds = ref<Set<string>>(new Set())
+const toggleReasoning = (msgId: string) => {
+  const next = new Set(expandedReasoningIds.value)
+  if (next.has(msgId)) next.delete(msgId)
+  else next.add(msgId)
+  expandedReasoningIds.value = next
+}
+
+// 获取消息的推理内容（streaming 用 progress，加载的用 reasoning）
+// 加载的 reasoning 需应用与 progress 相同的 strip 逻辑，保证条数一致
+const getReasoningSteps = (msg: Message): ProgressStep[] => {
+  if (msg.progress?.length) {
+    // progress 已在 response 事件中 strip，且仅含已完成的 tool
+    return msg.progress.filter((s) => s.type !== 'tool' || s.status === 'completed' || s.status === 'failed')
+  }
+  const r = msg.reasoning
+  if (!r?.length) return []
+  const displayContent = extractDisplayContent(msg.content || '')
+  const steps: ProgressStep[] = []
+  for (let i = 0; i < r.length; i++) {
+    const x = r[i]
+    const type = (x.type === 'tool' ? 'tool' : 'thinking') as 'thinking' | 'tool'
+    let message = x.message
+    if (type === 'thinking' && displayContent) {
+      const stripped = stripResponseFromThinking(message ?? '', displayContent)
+      if (!stripped) continue // 与 response 完全重复则跳过，与 progress 行为一致
+      message = stripped
+    }
+    steps.push({
+      id: `r_${i}`,
+      type,
+      message,
+      status: 'completed' as const,
+      toolName: x.name,
+      toolInput: x.input,
+      toolOutput: x.output,
+    })
+  }
+  return steps
+}
+
+// 流式时仅展示 thinking 步骤（不展示 tool call）
+const getStreamingThinkingSteps = (msg: Message): ProgressStep[] => {
+  return getReasoningSteps(msg).filter((s) => s.type === 'thinking')
+}
+
+// 将对象格式化为可读字符串（用于完整展示）
+const formatJsonBlock = (val: unknown): string => {
+  if (val == null) return ''
+  if (typeof val === 'string') return val
+  try {
+    return JSON.stringify(val, null, 2)
+  } catch {
+    return String(val)
+  }
+}
+
+// 从 response 中提取可展示内容：若包含 {"output": "..."} 则取 output 值（避免将 thinking 中的 JSON 原样展示）
+const extractDisplayContent = (content: string): string => {
+  if (!content || typeof content !== 'string') return content || ''
+  const trimmed = content.trim()
+  // 尝试从内容中解析 JSON，支持前缀如 "Now let me...\n\n{...}"
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] === '{') {
+      try {
+        const obj = JSON.parse(trimmed.slice(i))
+        if (obj && typeof obj === 'object' && typeof obj.output === 'string') {
+          return obj.output
+        }
+      } catch {
+        // 继续找下一个 {
+        continue
+      }
+    }
+  }
+  return content
+}
 
 // 会话列表
 interface SessionItem {
@@ -141,6 +243,7 @@ const sendMessage = async (promptText?: string) => {
     role: 'assistant',
     content: '',
     timestamp: Date.now() + 1,
+    progress: [],
   }
   messages.value.push(assistantMessage)
 
@@ -216,7 +319,7 @@ const sendMessage = async (promptText?: string) => {
 
           try {
             const data = JSON.parse(dataStr)
-            handleSSEEvent(currentEventType, data, assistantMessage)
+            handleSSEEvent(currentEventType, data, assistantMessage.id)
           } catch (e) {
             console.error('Failed to parse SSE event:', e, dataStr)
           }
@@ -230,7 +333,7 @@ const sendMessage = async (promptText?: string) => {
       if (dataStr !== '[DONE]') {
         try {
           const data = JSON.parse(dataStr)
-          handleSSEEvent(currentEventType, data, assistantMessage)
+          handleSSEEvent(currentEventType, data, assistantMessage.id)
         } catch (e) {
           console.error('Failed to parse SSE event:', e, dataStr)
         }
@@ -252,9 +355,51 @@ const sendMessage = async (promptText?: string) => {
   }
 }
 
+// 生成进度步骤 ID
+const generateProgressId = () => Math.random().toString(36).slice(2, 12)
+
+// 从 thinking 中移除与 response 重复的部分（考虑空白、大小写差异）
+const stripResponseFromThinking = (thinking: string, response: string): string => {
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase()
+  const tNorm = norm(thinking)
+  const rNorm = norm(response)
+  if (rNorm.length < 20) return thinking
+  let idx = tNorm.indexOf(rNorm)
+  if (idx < 0 && rNorm.length > 80) {
+    idx = tNorm.indexOf(rNorm.slice(0, 80))
+  }
+  if (idx < 0 && rNorm.length > 50) {
+    idx = tNorm.indexOf(rNorm.slice(0, 50))
+  }
+  if (idx < 0) return thinking
+  const beforeNorm = tNorm.slice(0, idx).trim()
+  if (!beforeNorm) return ''
+  let normIdx = 0
+  let lastWasSpace = false
+  for (let i = 0; i < thinking.length; i++) {
+    if (normIdx >= beforeNorm.length) return thinking.slice(0, i).trim()
+    const ch = thinking[i] ?? ''
+    if (/\s/.test(ch)) {
+      if (!lastWasSpace && normIdx > 0) normIdx++
+      lastWasSpace = true
+    } else {
+      lastWasSpace = false
+      normIdx++
+    }
+  }
+  return thinking
+}
+
+// 通过响应式引用更新消息，确保 Vue 能实时检测变化
+const getAssistantMessage = (id: string) => {
+  const idx = messages.value.findIndex((m) => m.id === id)
+  return idx >= 0 ? messages.value[idx] : null
+}
+
 // 处理 SSE 事件（与 datus-agent /chat/stream 格式一致）
 // datus-agent 发送: event: session/thinking/tool/response/actions/done/error + data: JSON
-const handleSSEEvent = (eventType: string, data: any, assistantMessage: Message) => {
+const handleSSEEvent = (eventType: string, data: any, assistantMessageId: string) => {
+  const msg = getAssistantMessage(assistantMessageId)
   switch (eventType) {
     case 'session':
       if (data?.session_id) {
@@ -262,26 +407,63 @@ const handleSSEEvent = (eventType: string, data: any, assistantMessage: Message)
       }
       break
     case 'thinking':
-      // 思考过程，可选择性显示
+      if (data?.text && msg) {
+        const text = String(data.text).trim()
+        if (!text || /chat interaction completed successfully/i.test(text)) return
+        if (!msg.progress) msg.progress = []
+        msg.progress = [...msg.progress, {
+          id: generateProgressId(),
+          type: 'thinking' as const,
+          message: text,
+          status: 'completed' as const,
+        }]
+      }
       break
     case 'tool':
-      // 工具调用进度
+      // 仅写入已完成的 tool（completed/failed），不写入 processing；支持 input/output 供推理面板完整展示
+      if ((data?.name != null || data?.status != null) && msg) {
+        const status = data.status === 'success' ? 'completed' : data.status === 'error' ? 'failed' : null
+        if (status === null) break // 忽略 processing 状态
+        if (!msg.progress) msg.progress = []
+        msg.progress = [...msg.progress, {
+          id: generateProgressId(),
+          type: 'tool' as const,
+          message: `${data.name ?? ''}: ${data.status ?? ''}`.trim() || '工具调用',
+          status,
+          toolName: data.name,
+          toolInput: data.input,
+          toolOutput: data.output,
+        }]
+      }
       break
     case 'response':
-      // datus-agent 使用 text 字段（非 content）
-      const text = data?.text ?? data?.content
-      if (text) {
-        assistantMessage.content += text
+      if (msg) {
+        const text = data?.text ?? data?.content
+        if (text) {
+          msg.content += text
+          const resp = String(text).trim()
+          if (resp && msg.progress?.length) {
+            const steps: ProgressStep[] = []
+            for (const step of msg.progress) {
+              if (step.type !== 'thinking') {
+                steps.push(step)
+                continue
+              }
+              const stripped = stripResponseFromThinking(step.message ?? '', resp)
+              if (stripped) steps.push(stripped === step.message ? step : { ...step, message: stripped })
+            }
+            msg.progress = steps
+          }
+        }
       }
       break
     case 'actions':
-      // 完整 action 历史，response 已包含主要内容
       break
     case 'done':
       isStreaming.value = false
       break
     case 'error':
-      assistantMessage.content += `\n\n[错误: ${data?.error || '未知错误'}]`
+      if (msg) msg.content += `\n\n[错误: ${data?.error || '未知错误'}]`
       isStreaming.value = false
       break
   }
@@ -294,6 +476,31 @@ const scrollToBottom = () => {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
   }
 }
+
+// 流式 thinking 容器引用，用于自动滚动到最新一条
+const thinkingStreamContainerRef = ref<HTMLElement | null>(null)
+const scrollThinkingToLatest = () => {
+  if (thinkingStreamContainerRef.value) {
+    thinkingStreamContainerRef.value.scrollTop = thinkingStreamContainerRef.value.scrollHeight
+  }
+}
+
+// 当流式 thinking 步骤更新时，滚动到最新
+watch(
+  () => {
+    const last = messages.value[messages.value.length - 1]
+    if (!last || last.role !== 'assistant') return 0
+    return getStreamingThinkingSteps(last).length
+  },
+  () => {
+    if (isStreaming.value) {
+      nextTick(() => {
+        scrollThinkingToLatest()
+        scrollToBottom()
+      })
+    }
+  },
+)
 
 // 清空对话
 const clearMessages = () => {
@@ -335,16 +542,14 @@ const loadSessions = async () => {
   }
 }
 
-// 加载会话历史（需 namespace 校验，datus-agent 新 API）
+// 加载会话历史（datus 返回 content=最终回复，reasoning=thinking+tools）
 const loadSessionHistory = async (sid: string) => {
   if (!selectedSourceId.value) return
   isLoading.value = true
   try {
     const { baseURL, authToken } = getRequestConfig()
     const url = `${baseURL}/api/v2/meta/bases/${props.baseId}/ai/chat/sessions/${sid}/messages?source_id=${selectedSourceId.value}`
-    const res = await fetch(url, {
-      headers: { 'xc-auth': authToken },
-    })
+    const res = await fetch(url, { headers: { 'xc-auth': authToken } })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     const msgs = (data.messages || []).map((m: any, i: number) => ({
@@ -352,6 +557,7 @@ const loadSessionHistory = async (sid: string) => {
       role: m.role || 'assistant',
       content: m.content || '',
       timestamp: typeof m.timestamp === 'number' ? m.timestamp : Date.parse(m.timestamp || '') || Date.now(),
+      reasoning: m.reasoning,
     }))
     messages.value = msgs
     sessionId.value = sid
@@ -594,7 +800,7 @@ watch(sessionListVisible, (open) => {
             :class="msg.role === 'user' ? 'flex flex-col items-end' : 'flex flex-col items-start'"
           >
             <div
-              class="rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm min-w-0 overflow-hidden"
+              class="rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm min-w-0 overflow-hidden max-w-full"
               :class="
                 msg.role === 'user'
                   ? 'bg-primary text-white rounded-br-sm'
@@ -602,14 +808,105 @@ watch(sessionListVisible, (open) => {
               "
             >
               <div v-if="msg.role === 'user'" class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
-              <ChatMarkdownBlock v-else :content="msg.content" />
+              <template v-else>
+                <!-- 流式进行中：仅展示 thinking，完整不截断 -->
+                <div
+                  v-if="getStreamingThinkingSteps(msg).length > 0 && isStreaming && msg.id === messages[messages.length - 1]?.id"
+                  :ref="(el) => { thinkingStreamContainerRef = el as HTMLElement | null }"
+                  class="space-y-2 mb-3 pb-3 border-b border-nc-border-gray-medium max-h-48 overflow-y-auto overflow-x-hidden nc-scrollbar-md min-w-0"
+                >
+                  <div
+                    v-for="step in getStreamingThinkingSteps(msg)"
+                    :key="step.id"
+                    class="flex items-start gap-2 text-xs min-w-0"
+                  >
+                    <GeneralIcon icon="ncInfo" class="w-3.5 h-3.5 mt-[0.2em] flex-shrink-0 text-primary/70" />
+                    <pre class="flex-1 min-w-0 max-w-full text-nc-content-gray-muted whitespace-pre-wrap break-words">{{ step.message }}</pre>
+                  </div>
+                </div>
+                <!-- 完成后：折叠的推理面板 - 完整展示 thinking 与 tool 的 input/output -->
+                <div
+                  v-else-if="getReasoningSteps(msg).length > 0"
+                  class="mb-3 rounded-lg border border-nc-border-gray-medium overflow-hidden w-full min-w-0 max-w-full"
+                >
+                  <button
+                    type="button"
+                    class="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-nc-content-gray bg-nc-bg-gray-extralight hover:bg-nc-bg-gray-light transition-colors"
+                    @click="toggleReasoning(msg.id)"
+                  >
+                    <GeneralIcon
+                      :icon="expandedReasoningIds.has(msg.id) ? 'ncChevronUp' : 'ncChevronDown'"
+                      class="w-3.5 h-3.5 flex-shrink-0 text-nc-content-gray-muted"
+                    />
+                    <span>推理思路</span>
+                    <span class="text-nc-content-gray-muted font-normal">({{ getReasoningSteps(msg).length }} 步)</span>
+                    <span class="flex-1" />
+                  </button>
+                  <div
+                    v-show="expandedReasoningIds.has(msg.id)"
+                    class="border-t border-nc-border-gray-medium max-h-80 overflow-y-auto overflow-x-hidden nc-scrollbar-md w-full min-w-0"
+                  >
+                    <div
+                      v-for="(step, idx) in getReasoningSteps(msg)"
+                      :key="step.id"
+                      class="border-b border-nc-border-gray-light last:border-b-0"
+                      :class="step.type === 'thinking' ? 'bg-white/50' : 'bg-nc-bg-gray-extralight/80'"
+                    >
+                      <!-- 步骤头部 -->
+                      <div class="flex items-center gap-2 px-3 py-2">
+                        <span
+                          class="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-[10px] font-medium"
+                          :class="step.type === 'thinking' ? 'bg-primary/10 text-primary' : 'bg-nc-bg-gray-medium text-nc-content-gray-muted'"
+                        >
+                          {{ idx + 1 }}
+                        </span>
+                        <GeneralIcon
+                          v-if="step.type === 'thinking'"
+                          icon="ncInfo"
+                          class="w-3.5 h-3.5 flex-shrink-0 text-primary/70"
+                        />
+                        <GeneralIcon
+                          v-else
+                          :icon="step.status === 'completed' ? 'ncCheck' : step.status === 'failed' ? 'close' : 'ncLoader'"
+                          :class="['w-3.5 h-3.5 flex-shrink-0', step.status === 'completed' && 'text-green-600', step.status === 'failed' && 'text-red-500', step.status === 'active' && 'animate-spin text-primary']"
+                        />
+                        <span class="text-xs font-medium text-nc-content-gray">
+                          {{ step.type === 'thinking' ? '推理' : '工具调用' }}
+                          <template v-if="step.type === 'tool' && step.toolName">: {{ step.toolName }}</template>
+                        </span>
+                      </div>
+                      <!-- 步骤内容：完整展示，约束在容器内不溢出 -->
+                      <div class="pl-8 pr-3 pb-3 min-w-0 w-full overflow-hidden">
+                        <!-- Thinking: 完整文本 -->
+                        <template v-if="step.type === 'thinking'">
+                          <pre class="nc-reasoning-block text-xs text-nc-content-gray">{{ step.message }}</pre>
+                        </template>
+                        <!-- Tool: 输入 / 输出分段展示 -->
+                        <template v-else>
+                          <div v-if="step.toolInput != null && (typeof step.toolInput === 'object' || (typeof step.toolInput === 'string' && step.toolInput))" class="mb-2 min-w-0">
+                            <div class="text-[10px] font-medium text-nc-content-gray-muted mb-1">输入</div>
+                            <pre class="nc-reasoning-block text-xs text-nc-content-gray">{{ formatJsonBlock(step.toolInput) }}</pre>
+                          </div>
+                          <div v-if="step.toolOutput != null && (typeof step.toolOutput === 'object' || (typeof step.toolOutput === 'string' && step.toolOutput))" class="min-w-0">
+                            <div class="text-[10px] font-medium text-nc-content-gray-muted mb-1">输出</div>
+                            <pre class="nc-reasoning-block text-xs text-nc-content-gray">{{ formatJsonBlock(step.toolOutput) }}</pre>
+                          </div>
+                          <!-- 无结构化 input/output 时回退到 message -->
+                          <div v-else-if="step.message" class="text-xs text-nc-content-gray nc-reasoning-block">{{ step.message }}</div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <ChatMarkdownBlock :content="extractDisplayContent(msg.content)" />
+              </template>
               <div
                 v-if="msg.role === 'assistant' && isStreaming && msg.id === messages[messages.length - 1]?.id"
-                class="inline-flex items-center gap-1 mt-2"
+                class="inline-flex items-center gap-1.5 mt-2 nc-typing-dots"
               >
-                <span class="w-1.5 h-1.5 bg-nc-content-gray-muted rounded-full animate-pulse"></span>
-                <span class="w-1.5 h-1.5 bg-nc-content-gray-muted rounded-full animate-pulse" style="animation-delay: 0.2s"></span>
-                <span class="w-1.5 h-1.5 bg-nc-content-gray-muted rounded-full animate-pulse" style="animation-delay: 0.4s"></span>
+                <span class="nc-typing-dot"></span>
+                <span class="nc-typing-dot" style="animation-delay: 0.15s"></span>
+                <span class="nc-typing-dot" style="animation-delay: 0.3s"></span>
               </div>
             </div>
           </div>
@@ -762,6 +1059,42 @@ watch(sessionListVisible, (open) => {
   width: 100%;
   min-width: 0;
   max-width: 100%;
+}
+
+/* 等待 response 时的动态打字指示器：圆点依次弹跳 */
+@keyframes typing-dot-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.nc-typing-dots {
+  align-items: flex-end;
+}
+
+.nc-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--nc-content-gray-muted, #6b7280);
+  animation: typing-dot-bounce 1.4s ease-in-out infinite;
+}
+
+/* 推理面板内容块：约束在容器内，长内容折行 + 内部滚动 */
+.nc-reasoning-block {
+  @apply rounded px-2.5 py-2 bg-nc-bg-default/80 border border-nc-border-gray-light;
+  max-height: 12rem;
+  overflow: auto;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-width: 100%;
+  font-family: ui-monospace, 'SF Mono', Monaco, monospace;
 }
 
 

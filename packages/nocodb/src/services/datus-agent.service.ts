@@ -96,6 +96,7 @@ export class DatusAgentService {
     request: { message: string; session_id?: string; namespace: string },
   ): Promise<Readable> {
     const headers = await this.authHeaders();
+    // 流式请求不宜设置 timeout，LLM 多次工具调用可能超过 60 秒
     const response: AxiosResponse<Readable> = await this.client.post(
       '/chat/stream',
       {
@@ -103,7 +104,7 @@ export class DatusAgentService {
         session_id: request.session_id,
         namespace: request.namespace,
       },
-      { responseType: 'stream', headers },
+      { responseType: 'stream', headers, timeout: 0 },
     );
     return response.data;
   }

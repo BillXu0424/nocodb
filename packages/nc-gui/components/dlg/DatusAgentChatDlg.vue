@@ -1,11 +1,23 @@
 <script lang="ts" setup>
 import type { SourceType } from 'nocodb-sdk'
 
+interface ProgressStep {
+  id: string
+  type: 'thinking' | 'tool'
+  message: string
+  status: 'pending' | 'active' | 'completed' | 'failed'
+  toolName?: string
+  toolInput?: Record<string, unknown> | string
+  toolOutput?: Record<string, unknown> | string
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
   timestamp: number
+  progress?: ProgressStep[]
+  reasoning?: Array<{ type: string; message: string }>
 }
 
 const props = defineProps<{
@@ -35,6 +47,47 @@ const isStreaming = ref(false)
 
 // 会话 ID
 const sessionId = ref<string>('')
+
+const expandedReasoningIds = ref<Set<string>>(new Set())
+const toggleReasoning = (msgId: string) => {
+  const next = new Set(expandedReasoningIds.value)
+  if (next.has(msgId)) next.delete(msgId)
+  else next.add(msgId)
+  expandedReasoningIds.value = next
+}
+const getReasoningSteps = (msg: Message): ProgressStep[] => {
+  if (msg.progress?.length) return msg.progress
+  const r = msg.reasoning
+  if (!r?.length) return []
+  return r.map((x, i) => ({
+    id: `r_${i}`,
+    type: (x.type === 'tool' ? 'tool' : 'thinking') as 'thinking' | 'tool',
+    message: x.message,
+    status: 'completed' as const,
+    toolName: (x as { name?: string }).name,
+    toolInput: (x as { input?: unknown }).input,
+    toolOutput: (x as { output?: unknown }).output,
+  }))
+}
+
+// 从 response 中提取可展示内容：若包含 {"output": "..."} 则取 output 值
+const extractDisplayContent = (content: string): string => {
+  if (!content || typeof content !== 'string') return content || ''
+  const trimmed = content.trim()
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed[i] === '{') {
+      try {
+        const obj = JSON.parse(trimmed.slice(i))
+        if (obj && typeof obj === 'object' && typeof obj.output === 'string') {
+          return obj.output
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+  return content
+}
 
 // 会话列表
 interface SessionItem {
@@ -95,6 +148,7 @@ const sendMessage = async () => {
     role: 'assistant',
     content: '',
     timestamp: Date.now() + 1,
+    progress: [],
   }
   messages.value.push(assistantMessage)
 
@@ -162,7 +216,7 @@ const sendMessage = async () => {
 
           try {
             const data = JSON.parse(dataStr)
-            handleSSEEvent(currentEventType, data, assistantMessage)
+            handleSSEEvent(currentEventType, data, assistantMessage.id)
           } catch (e) {
             console.error('Failed to parse SSE event:', e, dataStr)
           }
@@ -176,7 +230,7 @@ const sendMessage = async () => {
       if (dataStr !== '[DONE]') {
         try {
           const data = JSON.parse(dataStr)
-          handleSSEEvent(currentEventType, data, assistantMessage)
+          handleSSEEvent(currentEventType, data, assistantMessage.id)
         } catch (e) {
           console.error('Failed to parse SSE event:', e, dataStr)
         }
@@ -196,8 +250,43 @@ const sendMessage = async () => {
   }
 }
 
-// 处理 SSE 事件（与 datus-agent /chat/stream 格式一致）
-const handleSSEEvent = (eventType: string, data: any, assistantMessage: Message) => {
+const generateProgressId = () => Math.random().toString(36).slice(2, 12)
+
+const stripResponseFromThinking = (thinking: string, response: string): string => {
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase()
+  const tNorm = norm(thinking)
+  const rNorm = norm(response)
+  if (rNorm.length < 20) return thinking
+  let idx = tNorm.indexOf(rNorm)
+  if (idx < 0 && rNorm.length > 80) idx = tNorm.indexOf(rNorm.slice(0, 80))
+  if (idx < 0 && rNorm.length > 50) idx = tNorm.indexOf(rNorm.slice(0, 50))
+  if (idx < 0) return thinking
+  const beforeNorm = tNorm.slice(0, idx).trim()
+  if (!beforeNorm) return ''
+  let normIdx = 0
+  let lastWasSpace = false
+  for (let i = 0; i < thinking.length; i++) {
+    if (normIdx >= beforeNorm.length) return thinking.slice(0, i).trim()
+    const ch = thinking[i]
+    if (/\s/.test(ch)) {
+      if (!lastWasSpace && normIdx > 0) normIdx++
+      lastWasSpace = true
+    } else {
+      lastWasSpace = false
+      normIdx++
+    }
+  }
+  return thinking
+}
+
+const getAssistantMessage = (id: string) => {
+  const idx = messages.value.findIndex((m) => m.id === id)
+  return idx >= 0 ? messages.value[idx] : null
+}
+
+// 处理 SSE 事件（通过响应式引用更新，确保实时展示）
+const handleSSEEvent = (eventType: string, data: any, assistantMessageId: string) => {
+  const msg = getAssistantMessage(assistantMessageId)
   switch (eventType) {
     case 'session':
       if (data?.session_id) {
@@ -205,19 +294,61 @@ const handleSSEEvent = (eventType: string, data: any, assistantMessage: Message)
       }
       break
     case 'thinking':
+      if (data?.text && msg) {
+        const text = String(data.text).trim()
+        if (!text || /chat interaction completed successfully/i.test(text)) return
+        if (!msg.progress) msg.progress = []
+        msg.progress = [...msg.progress, {
+          id: generateProgressId(),
+          type: 'thinking' as const,
+          message: text,
+          status: 'completed' as const,
+        }]
+        nextTick(() => scrollToBottom())
+      }
+      break
     case 'tool':
+      if ((data?.name != null || data?.status != null) && msg) {
+        const status = data.status === 'success' ? 'completed' : data.status === 'error' ? 'failed' : null
+        if (status === null) break
+        if (!msg.progress) msg.progress = []
+        msg.progress = [...msg.progress, {
+          id: generateProgressId(),
+          type: 'tool' as const,
+          message: `${data.name ?? ''}: ${data.status ?? ''}`.trim() || '工具调用',
+          status,
+          toolName: data.name,
+          toolInput: data.input,
+          toolOutput: data.output,
+        }]
+      }
       break
     case 'response':
-      const text = data?.text ?? data?.content
-      if (text) {
-        assistantMessage.content += text
+      if (msg) {
+        const text = data?.text ?? data?.content
+        if (text) {
+          msg.content += text
+          const resp = String(text).trim()
+          if (resp && msg.progress?.length) {
+            const steps: ProgressStep[] = []
+            for (const step of msg.progress) {
+              if (step.type !== 'thinking') {
+                steps.push(step)
+                continue
+              }
+              const stripped = stripResponseFromThinking(step.message, resp)
+              if (stripped) steps.push(stripped === step.message ? step : { ...step, message: stripped })
+            }
+            msg.progress = steps
+          }
+        }
       }
       break
     case 'done':
       isStreaming.value = false
       break
     case 'error':
-      assistantMessage.content += `\n\n[错误: ${data?.error || '未知错误'}]`
+      if (msg) msg.content += `\n\n[错误: ${data?.error || '未知错误'}]`
       isStreaming.value = false
       break
   }
@@ -262,7 +393,7 @@ const loadSessions = async () => {
   }
 }
 
-// 加载会话历史（需 namespace 校验）
+// 加载会话历史（datus 返回 content=最终回复，reasoning=thinking+tools）
 const loadSessionHistory = async (sid: string) => {
   if (!selectedSourceId.value) return
   isLoading.value = true
@@ -279,6 +410,7 @@ const loadSessionHistory = async (sid: string) => {
       role: m.role || 'assistant',
       content: m.content || '',
       timestamp: typeof m.timestamp === 'number' ? m.timestamp : Date.parse(m.timestamp || '') || Date.now(),
+      reasoning: m.reasoning,
     }))
     sessionId.value = sid
     nextTick(() => scrollToBottom())
@@ -409,11 +541,88 @@ const selectedSource = computed(() => {
             "
           >
             <div v-if="msg.role === 'user'" class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
-            <ChatMarkdownBlock v-else :content="msg.content" />
+            <template v-else>
+              <div
+                v-if="getReasoningSteps(msg).length > 0 && isStreaming && msg.id === messages[messages.length - 1]?.id"
+                class="space-y-1.5 mb-3 pb-3 border-b border-nc-border-gray-medium"
+              >
+                <div
+                  v-for="step in getReasoningSteps(msg)"
+                  :key="step.id"
+                  class="flex items-start gap-2 text-xs text-nc-content-gray-muted"
+                >
+                  <GeneralIcon
+                    v-if="step.type === 'thinking'"
+                    icon="ncInfo"
+                    class="w-3.5 h-3.5 mt-[0.2em] flex-shrink-0"
+                  />
+                  <GeneralIcon
+                    v-else
+                    :icon="step.status === 'completed' ? 'ncCheck' : step.status === 'failed' ? 'close' : 'ncLoader'"
+                    :class="['w-3.5 h-3.5 mt-[0.2em] flex-shrink-0', step.status === 'completed' && 'text-green-500', step.status === 'failed' && 'text-red-500', step.status === 'active' && 'animate-spin']"
+                  />
+                  <span class="break-words min-w-0 whitespace-pre-wrap">{{ step.message }}</span>
+                </div>
+              </div>
+              <div v-else-if="getReasoningSteps(msg).length > 0" class="mb-3 rounded-lg border border-nc-border-gray-medium overflow-hidden">
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-nc-content-gray bg-nc-bg-gray-extralight hover:bg-nc-bg-gray-light transition-colors"
+                  @click="toggleReasoning(msg.id)"
+                >
+                  <GeneralIcon
+                    :icon="expandedReasoningIds.has(msg.id) ? 'ncChevronUp' : 'ncChevronDown'"
+                    class="w-3.5 h-3.5 flex-shrink-0 text-nc-content-gray-muted"
+                  />
+                  <span>推理思路</span>
+                  <span class="text-nc-content-gray-muted font-normal">({{ getReasoningSteps(msg).length }} 步)</span>
+                  <span class="flex-1" />
+                </button>
+                <div
+                  v-show="expandedReasoningIds.has(msg.id)"
+                  class="border-t border-nc-border-gray-medium max-h-56 overflow-y-auto nc-scrollbar-md"
+                >
+                  <div
+                    v-for="(step, idx) in getReasoningSteps(msg)"
+                    :key="step.id"
+                    class="flex items-start gap-3 px-3 py-2.5 border-b border-nc-border-gray-light last:border-b-0"
+                    :class="step.type === 'thinking' ? 'bg-white/50' : 'bg-nc-bg-gray-extralight/80'"
+                  >
+                    <span
+                      class="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center text-[10px] font-medium"
+                      :class="step.type === 'thinking' ? 'bg-primary/10 text-primary' : 'bg-nc-bg-gray-medium text-nc-content-gray-muted'"
+                    >
+                      {{ idx + 1 }}
+                    </span>
+                    <div class="flex items-start gap-2 min-w-0 flex-1">
+                      <GeneralIcon
+                        v-if="step.type === 'thinking'"
+                        icon="ncInfo"
+                        class="w-3.5 h-3.5 mt-[0.15em] flex-shrink-0 text-primary/70"
+                      />
+                      <GeneralIcon
+                        v-else
+                        :icon="step.status === 'completed' ? 'ncCheck' : step.status === 'failed' ? 'close' : 'ncLoader'"
+                        :class="['w-3.5 h-3.5 mt-[0.15em] flex-shrink-0', step.status === 'completed' && 'text-green-600', step.status === 'failed' && 'text-red-500', step.status === 'active' && 'animate-spin text-primary']"
+                      />
+                      <div class="text-xs leading-relaxed min-w-0">
+                        <span v-if="step.type === 'tool'" class="font-medium text-nc-content-gray-muted block mb-0.5">工具调用</span>
+                        <span class="break-words whitespace-pre-wrap text-nc-content-gray">{{ step.message }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <ChatMarkdownBlock :content="extractDisplayContent(msg.content)" />
+            </template>
             <div
               v-if="msg.role === 'assistant' && isStreaming && msg.id === messages[messages.length - 1]?.id"
-              class="inline-block w-2 h-2 bg-nc-content-gray rounded-full animate-pulse mt-1"
-            />
+              class="inline-flex items-end gap-1.5 mt-1 nc-typing-dots"
+            >
+              <span class="nc-typing-dot"></span>
+              <span class="nc-typing-dot" style="animation-delay: 0.15s"></span>
+              <span class="nc-typing-dot" style="animation-delay: 0.3s"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -459,5 +668,29 @@ const selectedSource = computed(() => {
   :deep(.ant-drawer-body) {
     @apply flex flex-col p-4;
   }
+}
+
+/* 等待 response 时的动态打字指示器：圆点依次弹跳 */
+@keyframes typing-dot-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.nc-typing-dots {
+  align-items: flex-end;
+}
+
+.nc-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--nc-content-gray-muted, #6b7280);
+  animation: typing-dot-bounce 1.4s ease-in-out infinite;
 }
 </style>
