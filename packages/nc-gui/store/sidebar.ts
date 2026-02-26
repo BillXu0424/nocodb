@@ -42,6 +42,12 @@ export const useSidebarStore = defineStore('sidebarStore', () => {
 
   const isRightSidebarOpen = ref(true)
 
+  /** 右侧 AI 问数聊天侧边栏是否折叠收起 */
+  const isRightChatSidebarCollapsed = ref(false)
+
+  /** 右侧 AI 问数聊天侧边栏是否最大化（覆盖主界面） */
+  const isRightChatSidebarMaximized = ref(false)
+
   const leftSideBarSize = ref({
     old: _leftSidebarSize.value?.old ?? INITIAL_LEFT_SIDEBAR_WIDTH,
     current: isViewPortMobile() ? 0 : _leftSidebarSize.value?.current ?? INITIAL_LEFT_SIDEBAR_WIDTH,
@@ -131,6 +137,8 @@ export const useSidebarStore = defineStore('sidebarStore', () => {
   return {
     isLeftSidebarOpen,
     isRightSidebarOpen,
+    isRightChatSidebarCollapsed,
+    isRightChatSidebarMaximized,
     leftSidebarWidthPercent,
     leftSideBarSize,
     leftSidebarState,

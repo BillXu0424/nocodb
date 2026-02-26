@@ -24,12 +24,29 @@ const {
   showTopbar,
   miniSidebarWidth,
   isFullScreen,
+  isRightChatSidebarCollapsed,
+  isRightChatSidebarMaximized,
 } = storeToRefs(useSidebarStore())
 
 const { isSharedBase } = storeToRefs(useBase())
 
 const workspaceId = computed(() => {
   return route.value.params.typeOrId as string
+})
+
+// 获取当前 baseId
+const baseId = computed(() => {
+  return route.value.params.baseId as string | undefined
+})
+
+// 是否显示右侧问数侧边栏（仅在非共享 base 且有 baseId 时显示）
+const showRightChatSidebar = computed(() => {
+  return !isSharedBase.value && !!baseId.value
+})
+
+// 聊天侧边栏是否可见（显示且未折叠）
+const isRightChatSidebarVisible = computed(() => {
+  return showRightChatSidebar.value && !isRightChatSidebarCollapsed.value
 })
 
 const wrapperRef = ref<HTMLDivElement>()
@@ -51,7 +68,15 @@ const mobileNormalizedContentSize = computed(() => {
     return isLeftSidebarOpen.value ? 0 : 100
   }
 
-  return 100 - leftSidebarWidthPercent.value
+  // 最大化时主内容区为 0，chat 占满
+  if (showRightChatSidebar.value && isRightChatSidebarMaximized.value) {
+    return 0
+  }
+  // 如果有右侧问数侧边栏且未折叠，需要预留空间；折叠时只留小条
+  const rightSidebarPercent = showRightChatSidebar.value
+    ? (isRightChatSidebarCollapsed.value ? 2 : 25)
+    : 0
+  return 100 - leftSidebarWidthPercent.value - rightSidebarPercent
 })
 
 watch(currentSidebarSize, () => {
@@ -219,6 +244,20 @@ const isMiniSidebarVisible = computed(() => {
     !isFullScreen.value
   )
 })
+
+function toggleRightChatSidebar() {
+  isRightChatSidebarCollapsed.value = !isRightChatSidebarCollapsed.value
+  if (isRightChatSidebarCollapsed.value) {
+    isRightChatSidebarMaximized.value = false
+  }
+}
+
+function toggleRightChatMaximize() {
+  isRightChatSidebarMaximized.value = !isRightChatSidebarMaximized.value
+  if (isRightChatSidebarMaximized.value) {
+    isRightChatSidebarCollapsed.value = false
+  }
+}
 </script>
 
 <template>
@@ -245,16 +284,17 @@ const isMiniSidebarVisible = computed(() => {
       >
         <Pane
           min-size="15%"
-          :size="mobileNormalizedSidebarSize"
+          :size="isRightChatSidebarMaximized ? 0 : mobileNormalizedSidebarSize"
           max-size="60%"
           class="nc-sidebar-splitpane !sm:max-w-140 relative !overflow-visible flex"
           :class="{
-            hidden: hideSidebar,
+            hidden: hideSidebar || isRightChatSidebarMaximized,
           }"
-          :style="{
-            'width': `${mobileNormalizedSidebarSize}%`,
-            'min-width': `${mobileNormalizedSidebarSize}%`,
-          }"
+          :style="
+            isRightChatSidebarMaximized
+              ? { width: '0%', 'min-width': '0%' }
+              : { width: `${mobileNormalizedSidebarSize}%`, 'min-width': `${mobileNormalizedSidebarSize}%` }
+          "
         >
           <div
             ref="wrapperRef"
@@ -274,12 +314,27 @@ const isMiniSidebarVisible = computed(() => {
         </Pane>
         <Pane
           :size="mobileNormalizedContentSize"
-          class="flex-grow !overflow-auto"
-          :style="{
-            'min-width': `${mobileNormalizedContentSize}%`,
-          }"
+          :min-size="isRightChatSidebarMaximized ? 0 : (showRightChatSidebar ? 30 : 0)"
+          class="flex-grow !overflow-auto min-w-0"
         >
           <slot name="content" />
+        </Pane>
+        <!-- 右侧 AI 问数聊天侧边栏：最大化时占满，折叠时显示窄条，否则 25% -->
+        <Pane
+          v-if="showRightChatSidebar"
+          :size="isRightChatSidebarMaximized ? 100 : (isRightChatSidebarCollapsed ? 2 : 25)"
+          :min-size="isRightChatSidebarMaximized ? 100 : (isRightChatSidebarCollapsed ? 2 : 20)"
+          :max-size="isRightChatSidebarMaximized ? 100 : (isRightChatSidebarCollapsed ? 2 : 35)"
+          class="nc-right-chat-sidebar-pane flex-shrink-0 overflow-hidden"
+        >
+          <DashboardDatusAgentChatSidebar
+            v-if="baseId"
+            :base-id="baseId"
+            :collapsed="isRightChatSidebarCollapsed"
+            :maximized="isRightChatSidebarMaximized"
+            @toggle-collapse="toggleRightChatSidebar"
+            @toggle-maximize="toggleRightChatMaximize"
+          />
         </Pane>
       </Splitpanes>
     </div>
@@ -366,6 +421,10 @@ const isMiniSidebarVisible = computed(() => {
 
 .splitpanes__pane {
   transition: width 0.15s ease-in-out !important;
+}
+
+.nc-right-chat-sidebar-pane {
+  transition: width 0.28s ease-in-out !important;
 }
 
 .splitpanes--dragging {

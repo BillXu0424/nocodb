@@ -64,6 +64,7 @@ import { SortsController } from '~/controllers/sorts.controller';
 import { SourcesController } from '~/controllers/sources.controller';
 import { SyncController } from '~/controllers/sync.controller';
 import { TablesController } from '~/controllers/tables.controller';
+import { DatusAgentController } from '~/controllers/datus-agent.controller';
 import { UtilsController } from '~/controllers/utils.controller';
 import { ViewColumnsController } from '~/controllers/view-columns.controller';
 import { ViewsController } from '~/controllers/views.controller';
@@ -227,6 +228,7 @@ export const nocoModuleMetadata = {
           SyncController,
           SortsController,
           SharedBasesController,
+          DatusAgentController,
           NotificationsController,
           CommandPaletteController,
           ExtensionsController,
