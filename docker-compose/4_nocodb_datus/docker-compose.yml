@@ -2,13 +2,13 @@
 # 共享 nc_data 卷，使 Datus 能访问 NocoDB 的 SQLite 文件，正确创建 namespace
 # 运行前请设置 .env 中的 DATUS_SOURCE_PATH（datus-agent 源码目录）
 
-version: '3.8'
-
 services:
   nocodb:
-    build:
-      context: ../..
-      dockerfile: packages/nocodb/Dockerfile.local
+    # 二开版本：在本地（有外网）构建后导出，在开发机 load
+    # 本地执行：./build-local-docker-image.sh
+    #         docker save -o nocodb-local.tar nocodb-local
+    # 开发机：sudo docker load -i nocodb-local.tar
+    image: nocodb-local:latest
     ports:
       - "8080:8080"
     restart: always
@@ -34,16 +34,18 @@ services:
       - "8002:8002"
       - "7681:7681"
     volumes:
-      # Datus 自身配置与数据
-      - datus_conf:/root/.datus/conf
-      - datus_data:/root/.datus/data
-      - datus_logs:/root/.datus/logs
-      - datus_hf_cache:/root/.cache/huggingface
+      # 使用主机目录。sudo 时 $HOME 会变成 /root，需在 .env 中设置 DATUS_HOME 为实际用户 home
+      - ${DATUS_HOME:-$HOME}/.datus/conf:/root/.datus/conf
+      - ${DATUS_HOME:-$HOME}/.datus/data:/root/.datus/data
+      - ${DATUS_HOME:-$HOME}/.datus/logs:/root/.datus/logs
+      - ${DATUS_HOME:-$HOME}/.cache/huggingface:/root/.cache/huggingface
       # 共享 NocoDB 的 SQLite 目录，使 Datus 能读取 nc_minimal_dbs/*.db
       - nc_data:/usr/app/data:ro
     environment:
       - PYTHONUNBUFFERED=1
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      # LLM API Key（agent.yml 中引用），按实际使用配置
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     networks:
       - nocodb_datus
     restart: always
@@ -53,8 +55,4 @@ networks:
     driver: bridge
 
 volumes:
-  nc_data: {}          # 共享：NocoDB 数据 + SQLite 文件，Datus 只读挂载
-  datus_conf: {}
-  datus_data: {}
-  datus_logs: {}
-  datus_hf_cache: {}
+  nc_data: {}          # 共享：NocoDB 数据 + SQLite 文件，Datus 只读挂载（Docker 管理）

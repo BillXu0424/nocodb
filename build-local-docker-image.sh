@@ -50,7 +50,22 @@ function package_nocodb() {
 
 function build_image() {
     # build docker
-    docker build . -f Dockerfile.local -t nocodb-local || ERROR="build_image failed"
+    # 无法访问 Docker Hub 时：
+    #   1. 在有网络机器：docker pull --platform linux/amd64 node:22-slim && docker save -o node-22-slim.tar node:22-slim
+    #   2. 传到本机后：docker load -i node-22-slim.tar
+    #   3. 执行：DOCKER_BUILD_PULL=false DOCKER_PLATFORM=linux/amd64 ./build-local-docker-image.sh
+    PLATFORM_ARG=""
+    [[ -n "${DOCKER_PLATFORM}" ]] && PLATFORM_ARG="--platform ${DOCKER_PLATFORM}"
+    PULL_ARG=""
+    [[ "${DOCKER_BUILD_PULL}" == "false" ]] && PULL_ARG="--pull=false"
+
+    # 预加载 node 镜像（可选）：DOCKER_NODE_IMAGE_TAR=/path/to/node-22-slim.tar
+    if [[ -n "${DOCKER_NODE_IMAGE_TAR}" ]] && [[ -f "${DOCKER_NODE_IMAGE_TAR}" ]]; then
+        echo "Info: Loading node base image from ${DOCKER_NODE_IMAGE_TAR}"
+        docker load -i "${DOCKER_NODE_IMAGE_TAR}" || true
+    fi
+
+    docker build . -f Dockerfile.local -t nocodb-local:latest ${PLATFORM_ARG} ${PULL_ARG} || ERROR="build_image failed"
 }
 
 function log_message() {
