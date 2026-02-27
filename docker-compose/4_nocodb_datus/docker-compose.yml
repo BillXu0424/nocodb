@@ -1,0 +1,58 @@
+# NocoDB + Datus Agent 联合部署
+# 共享 nc_data 卷，使 Datus 能访问 NocoDB 的 SQLite 文件，正确创建 namespace
+# 运行前请设置 .env 中的 DATUS_SOURCE_PATH（datus-agent 源码目录）
+
+version: '3.8'
+
+services:
+  nocodb:
+    image: nocodb/nocodb:latest
+    ports:
+      - "8080:8080"
+    restart: always
+    environment:
+      NC_DB: "sqlite3://?d=noco.db"
+      NC_MINIMAL_DBS: "true"
+      NC_TOOL_DIR: "/usr/app/data/"
+      # 同 compose 网络，用服务名访问 Datus
+      NC_DATUS_AGENT_URL: "http://datus-backend:8002"
+      NC_DATUS_CLIENT_ID: "${NC_DATUS_CLIENT_ID:-datus_client}"
+      NC_DATUS_CLIENT_SECRET: "${NC_DATUS_CLIENT_SECRET:-datus_secret_key}"
+    volumes:
+      - nc_data:/usr/app/data
+    networks:
+      - nocodb_datus
+
+  datus-backend:
+    build:
+      context: ${DATUS_SOURCE_PATH}
+      dockerfile: docker/backend/Dockerfile
+    container_name: datus-backend
+    ports:
+      - "8002:8002"
+      - "7681:7681"
+    volumes:
+      # Datus 自身配置与数据
+      - datus_conf:/root/.datus/conf
+      - datus_data:/root/.datus/data
+      - datus_logs:/root/.datus/logs
+      - datus_hf_cache:/root/.cache/huggingface
+      # 共享 NocoDB 的 SQLite 目录，使 Datus 能读取 nc_minimal_dbs/*.db
+      - nc_data:/usr/app/data:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+    networks:
+      - nocodb_datus
+    restart: always
+
+networks:
+  nocodb_datus:
+    driver: bridge
+
+volumes:
+  nc_data: {}          # 共享：NocoDB 数据 + SQLite 文件，Datus 只读挂载
+  datus_conf: {}
+  datus_data: {}
+  datus_logs: {}
+  datus_hf_cache: {}
