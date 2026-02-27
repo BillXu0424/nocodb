@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 ################
 # NocoDB Builder
 ################
@@ -22,11 +20,11 @@ RUN python3 --version && python --version
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Copy application dependency manifests to the container image.
-COPY --link ./package.json ./package.json
-COPY --link ./docker/main.js ./docker/index.js
-COPY --link ./docker/start-local.sh /usr/src/appEntry/start.sh
-COPY --link src/public/ ./docker/public/
-COPY --link ./docker/nc-gui/ ./docker/nc-gui/
+COPY ./package.json ./package.json
+COPY ./docker/main.js ./docker/index.js
+COPY ./docker/start-local.sh /usr/src/appEntry/start.sh
+COPY src/public/ ./docker/public/
+COPY ./docker/nc-gui/ ./docker/nc-gui/
 
 # Configure pnpm to use hoisted node_modules for modclean compatibility
 RUN echo "node-linker=hoisted" > .npmrc
@@ -60,8 +58,8 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy production code & main entry file
-COPY --link --from=builder /usr/src/app/ /usr/src/app/
-COPY --link --from=builder /usr/src/appEntry/ /usr/src/appEntry/
+COPY --from=builder /usr/src/app/ /usr/src/app/
+COPY --from=builder /usr/src/appEntry/ /usr/src/appEntry/
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
