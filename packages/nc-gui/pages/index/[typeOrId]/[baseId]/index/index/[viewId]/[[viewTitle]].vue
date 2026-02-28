@@ -1,4 +1,8 @@
 <script setup lang="ts">
+definePageMeta({
+  hasSidebar: true,
+})
+
 const { getMeta } = useMetas()
 
 const baseStore = useBase()

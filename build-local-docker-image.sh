@@ -75,7 +75,7 @@ function log_message() {
         >&2 echo "ERROR: ${ERROR}"
         exit 1
     else
-        echo 'docker image with tag "nocodb-local" built sussessfully. Use below sample command to run the container'
+        echo 'docker image with tag "nocodb-local" built successfully. Use below sample command to run the container'
         echo 'docker run -d -p 3333:8080 --name nocodb-local nocodb-local '
     fi
 }
